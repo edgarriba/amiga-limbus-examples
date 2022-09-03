@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from limbus.core import Component, Pipeline, Params, ComponentState 
 
 from farm_ng.oak.client import OakCameraClient, OakCameraClientConfig
@@ -84,6 +85,7 @@ class KorniaProcess(Component):
         return ComponentState.OK
 
 
+# NOTE: thos is the old scriptic mode
 async def main():
     cam = AmigaCamera("oak1")
     viz1 = OpencvWindow("viz_raw")
@@ -104,5 +106,48 @@ async def main():
     await pipeline.async_execute()
 
 
+class BaseApp(ABC):
+    def __init__(self) -> None:
+        super().__init__()
+        self.pipeline = Pipeline()
+    
+    def register_component(self, obj):
+        self.pipeline.add_nodes(obj)
+        setattr(self, obj.name, obj)
+    
+    @abstractmethod
+    def register_components(self):
+        raise NotImplementedError
+    
+    @abstractmethod
+    def connect_components(self):
+        raise NotImplementedError
+
+    async def run(self):
+        self.register_components()
+        self.connect_components()
+        self.pipeline.traverse()
+        return await self.pipeline.async_execute()
+
+
+class CameraApp(BaseApp):
+
+    def register_components(self):
+        self.register_component(AmigaCamera("cam"))
+        self.register_component(OpencvWindow("viz1"))
+        self.register_component(OpencvWindow("viz2"))
+        self.register_component(KorniaProcess("imgproc"))
+    
+    def connect_components(self):
+        self.cam.outputs.img.connect(self.viz1.inputs.img)
+        self.cam.outputs.img.connect(self.imgproc.inputs.img)
+        self.imgproc.outputs.img.connect(self.viz2.inputs.img)
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.get_event_loop()
+    try:
+        loop.run_until_complete(CameraApp().run())
+    except asyncio.CancelledError as ex:
+        pass
+    loop.close()
