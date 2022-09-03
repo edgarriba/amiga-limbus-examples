@@ -26,7 +26,8 @@ class AmigaCamera(Component):
   
     async def forward(self):
         if self.stream is None:
-            self.stream = await self.client.stream_frames(every_n=10)
+            await self.client.start_service()
+            self.stream = self.client.stream_frames(every_n=10)
 
         response = await self.stream.read()
         frame = response.frame
