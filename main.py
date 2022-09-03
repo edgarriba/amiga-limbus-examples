@@ -139,9 +139,9 @@ class CameraApp(BaseApp):
         self.register_component(KorniaProcess("imgproc"))
     
     def connect_components(self):
-        self.cam.outputs.img.connect(self.viz1.inputs.img)
-        self.cam.outputs.img.connect(self.imgproc.inputs.img)
-        self.imgproc.outputs.img.connect(self.viz2.inputs.img)
+        self.cam.outputs.img >> self.viz1.inputs.img
+        self.cam.outputs.img >> self.imgproc.inputs.img
+        self.imgproc.outputs.img >> self.viz2.inputs.img
 
 
 if __name__ == "__main__":
