@@ -1,58 +1,74 @@
-from abc import ABC, abstractmethod
-from limbus.core import Component, Pipeline, Params, ComponentState 
+import argparse
+import asyncio
 
-from farm_ng.oak.client import OakCameraClient, OakCameraClientConfig
+from limbus.core import Component, InputParams, OutputParams, ComponentState 
+from limbus.core.app import App
+
+from farm_ng.core.events_file_writer import EventsFileWriter
+from farm_ng.oak.camera_client import OakCameraClient
+from farm_ng.service.service_client import ClientConfig
 
 import numpy as np
 import cv2
 import kornia as K
+from turbojpeg import TurboJPEG
 
-import asyncio
 
 class AmigaCamera(Component):
 
-    def __init__(self, name: str):
+    def __init__(self, name: str, address: str, port: int):
         super().__init__(name)
         # configure the camera client
-        self.config = OakCameraClientConfig(address="192.168.1.93", port=50051)
+        self.config = ClientConfig(address=address, port=port)
         self.client = OakCameraClient(self.config)
 
-        self.stream = None
+        # create a stream
+        self.stream = self.client.stream_frames(every_n=10)
 
     @staticmethod
-    def register_outputs():
-        outputs = Params()
-        outputs.declare("img")
-        return outputs
+    def register_outputs(outputs: OutputParams) -> None:
+        outputs.declare("rgb")
+        outputs.declare("disparity")
   
     async def forward(self):
-        if self.stream is None:
-            await self.client.start_service()
-            self.stream = self.client.stream_frames(every_n=10)
-
         response = await self.stream.read()
         frame = response.frame
         
-        data: bytes = getattr(frame, "rgb").image_data
+        await asyncio.gather(
+            self._outputs.rgb.send(frame.rgb.image_data),
+            self._outputs.disparity.send(frame.disparity))
 
-        # use imdecode function
-        image = np.frombuffer(data, dtype="uint8")
-        image = cv2.imdecode(image, cv2.IMREAD_COLOR)
+        return ComponentState.OK
 
-        self.outputs.set_param("img", image)
+
+class ImageDecoder(Component):
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.decoder = TurboJPEG()
+    
+    @staticmethod
+    def register_inputs(inputs: InputParams) -> None:
+        inputs.declare("data")
+
+    @staticmethod
+    def register_outputs(outputs: OutputParams) -> None:
+        outputs.declare("img")
+
+    async def forward(self):
+        data: bytes = await self._inputs.data.receive()
+        image: np.ndarray = self.decoder.decode(data)
+        await self._outputs.img.send(image)
         return ComponentState.OK
 
 
 class OpencvWindow(Component):
 
     @staticmethod
-    def register_inputs():
-        inputs = Params()
+    def register_inputs(inputs: InputParams) -> None:
         inputs.declare("img")
-        return inputs
 
     async def forward(self):
-        img = self.inputs.get_param("img")
+        img: np.ndarray = await self._inputs.img.receive()
         cv2.imshow(f"{self.name}", img)
         cv2.waitKey(1)
         return ComponentState.OK
@@ -61,93 +77,87 @@ class OpencvWindow(Component):
 class KorniaProcess(Component):
 
     @staticmethod
-    def register_inputs():
-        inputs = Params()
+    def register_inputs(inputs: InputParams) -> None:
         inputs.declare("img")
-        return inputs
 
     @staticmethod
-    def register_outputs():
-        inputs = Params()
-        inputs.declare("img")
-        return inputs
+    def register_outputs(outputs: OutputParams) -> None:
+        outputs.declare("img")
 
     async def forward(self):
-        img = self.inputs.get_param("img")
+        img = await self._inputs.img.receive()
 
         img_t = K.image_to_tensor(img)
         img_t = img_t[None].float() / 255.
-        img_t = K.filters.sobel(img_t, normalized=False)
+        img_t = K.filters.sobel(img_t.cuda(), normalized=False)
 
         img = K.tensor_to_image(img_t)
-        self.outputs.set_param("img", img)
+        await self._outputs.img.send(img)
 
         return ComponentState.OK
 
 
-# NOTE: thos is the old scriptic mode
-async def main():
-    cam = AmigaCamera("oak1")
-    viz1 = OpencvWindow("viz_raw")
-    viz2 = OpencvWindow("viz_img")
-    imgproc = KorniaProcess("imgproc")
+class EventsWriter(Component):
 
-    cam.outputs.img.connect(viz1.inputs.img)
-    cam.outputs.img.connect(imgproc.inputs.img)
-    imgproc.outputs.img.connect(viz2.inputs.img)
+    def __init__(self, name: str):
+        super().__init__(name)
+        self.writer = EventsFileWriter("amiga-limbus-app.bin")
+        assert self.writer.open()
 
-    pipeline = Pipeline()
-    # NOTE: in future not needed
-    pipeline.add_nodes([cam, viz1, viz2, imgproc])
-    
-    # run your pipeline
-    # NOTE: in future not needed
-    pipeline.traverse()
-    await pipeline.async_execute()
+    @staticmethod
+    def register_inputs(inputs: InputParams) -> None:
+        inputs.declare("data")
+
+    async def forward(self):
+        data: bytes = await self._inputs.data.receive()
+        self.writer.write("disparity", data)
+        return ComponentState.OK
 
 
-class BaseApp(ABC):
-    def __init__(self) -> None:
+class AmigaApp(App):
+
+    def __init__(self, address: str, port: int) -> None:
+        self.address = address
+        self.port = port
         super().__init__()
-        self.pipeline = Pipeline()
-    
-    def register_component(self, obj):
-        self.pipeline.add_nodes(obj)
-        setattr(self, obj.name, obj)
-    
-    @abstractmethod
-    def register_components(self):
-        raise NotImplementedError
-    
-    @abstractmethod
-    def connect_components(self):
-        raise NotImplementedError
 
-    async def run(self):
-        self.register_components()
-        self.connect_components()
-        self.pipeline.traverse()
-        return await self.pipeline.async_execute()
-
-
-class CameraApp(BaseApp):
-
-    def register_components(self):
-        self.register_component(AmigaCamera("cam"))
-        self.register_component(OpencvWindow("viz1"))
-        self.register_component(OpencvWindow("viz2"))
-        self.register_component(KorniaProcess("imgproc"))
+    def create_components(self):
+        self.cam = AmigaCamera("cam", address=self.address, port=self.port)
+        self.decoder = ImageDecoder("decoder")
+        self.viz1 = OpencvWindow("viz1")
+        self.viz2 = OpencvWindow("viz2")
+        self.imgproc = KorniaProcess("imgproc")
+        self.writer = EventsWriter("writer")
     
     def connect_components(self):
-        self.cam.outputs.img >> self.viz1.inputs.img
-        self.cam.outputs.img >> self.imgproc.inputs.img
+        self.cam.outputs.rgb >> self.decoder.inputs.data
+        self.cam.outputs.disparity >> self.writer.inputs.data
+        self.decoder.outputs.img >> self.viz1.inputs.img
+        self.decoder.outputs.img >> self.imgproc.inputs.img
         self.imgproc.outputs.img >> self.viz2.inputs.img
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(prog="amiga-limbus-app")
+    parser.add_argument(
+        "--address",
+        type=str,
+        required=True,
+        help="The IP address of the Amiga camera.",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        required=True,
+        help="The port of the Amiga camera.",
+    )
+    args = parser.parse_args()
+
     loop = asyncio.get_event_loop()
+
+    app = AmigaApp(args.address, args.port)
     try:
-        loop.run_until_complete(CameraApp().run())
+        loop.run_until_complete(app.run())
     except asyncio.CancelledError as ex:
         pass
     loop.close()
