@@ -1,0 +1,6 @@
+limbus@git+https://git@github.com/kornia/limbus.git
+kornia==0.6.9
+opencv-python<4.7
+farm-ng-amiga
+farm-ng-core
+PyTurboJPEG

@@ -23,7 +23,7 @@ class AmigaCamera(Component):
         self.client = OakCameraClient(self.config)
 
         # create a stream
-        self.stream = self.client.stream_frames(every_n=10)
+        self.stream = self.client.stream_frames(every_n=1)
 
     @staticmethod
     def register_outputs(outputs: OutputParams) -> None:
